@@ -69,6 +69,10 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
 
     private long selectedEntityId = 0;
 
+    // A title shown in the field that is not an entity yet (a payee named by an intent, say).
+    // It is created only when the transaction is saved, see autoCreateNewEntityFromSearch().
+    private String pendingNewTitle;
+
     long[] includeEntityIds;
     boolean fetchAllEntities = false;
     boolean enableCreate = true;
@@ -155,6 +159,7 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
                     }
                 }
                 selectEntity(selectedEntityId);
+                showPendingNewEntity();
                 if (pendingSelect) {
                     pickEntity();
                 }
@@ -250,6 +255,7 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
                     .setNegativeButton(R.string.no, null)
                     .show();
         } else if (id == clearBtnId) {
+            pendingNewTitle = null;
             clearSelection();
         }
     }
@@ -286,12 +292,16 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
     }
 
     public void onSelectedPos(int id, int selectedPos) {
-        if (id == layoutId) onEntitySelected(selectedPos);
+        if (id == layoutId) {
+            pendingNewTitle = null;
+            onEntitySelected(selectedPos);
+        }
     }
 
     public void onSelectedId(int id, long selectedId) {
         if (id != layoutId) return;
 
+        pendingNewTitle = null;
         selectEntity(selectedId);
     }
 
@@ -407,6 +417,7 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
     }
 
     private void manualCreateNewEntityFromSearch() {
+        pendingNewTitle = null;
         String title = autoCompleteFilter.getText().toString();
         T e = em.findOrInsertEntityByTitle(entityClass, title);
 
@@ -418,13 +429,46 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
     }
 
     protected void autoCreateNewEntityFromSearch() {
+        boolean searchTyped = autoCompleteFilter != null
+                && autoCompleteFilter.getVisibility() == View.VISIBLE
+                && autoCompleteFilter.getText().length() > 0;
         if (autoCompleteFilter != null
                 && autoCompleteFilter.getVisibility() == View.VISIBLE
-                && selectedEntityId == 0)
+                && selectedEntityId == 0
+                && (pendingNewTitle == null || searchTyped))
         {
             String title = autoCompleteFilter.getText().toString();
             T e = em.findOrInsertEntityByTitle(entityClass, title);
             selectEntity(e);
+        }
+        else if (pendingNewTitle != null
+                && selectedEntityId == 0
+                && node != null && node.getVisibility() != View.GONE)
+        {
+            T e = em.findOrInsertEntityByTitle(entityClass, pendingNewTitle);
+            pendingNewTitle = null;
+            selectEntity(e);
+        }
+    }
+
+    /**
+     * Shows a title that is not an entity yet. Nothing is written to the database: the entity
+     * is created when the transaction is saved, unless the user picks or clears something else.
+     */
+    public void setPendingNewEntity(String title) {
+        pendingNewTitle = title;
+        synchronized (this) {
+            if (!loaded) {
+                return; // shown by fetchEntities() once the list has loaded
+            }
+        }
+        showPendingNewEntity();
+    }
+
+    private void showPendingNewEntity() {
+        if (isShow && pendingNewTitle != null && selectedEntityId == 0 && text != null) {
+            text.setText(pendingNewTitle);
+            showHideMinusBtn(true);
         }
     }
 

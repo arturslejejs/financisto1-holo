@@ -57,6 +57,7 @@ import tw.tib.financisto.view.AttributeViewFactory;
 import tw.tib.financisto.widget.RateLayoutView;
 
 import java.text.DateFormat;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
@@ -221,6 +222,7 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 		long accountId = -1;
 		long transactionId = -1;
 		boolean isNewFromTemplate = false;
+		IntentTransactionProcessor.Prefill prefill = null;
 		final Intent intent = getIntent();
 		if (intent != null) {
 			accountId = intent.getLongExtra(ACCOUNT_ID_EXTRA, -1);
@@ -235,6 +237,11 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 					transaction.id = -1;
 					transaction.dateTime = System.currentTimeMillis();
 				}
+			} else if (isIntentPrefillSupported() && IntentTransactionProcessor.hasPrefillExtras(intent)) {
+				// A new transaction pre-filled by another app (the same extras as the
+				// NEW_TRANSACTION service), shown for review and saved only by the user.
+				prefill = new IntentTransactionProcessor(db).createPrefillFromIntent(intent);
+				transaction = prefill.transaction;
 			}
 			transaction.isTemplate = intent.getIntExtra(TEMPLATE_EXTRA, transaction.isTemplate);
 		}
@@ -360,6 +367,8 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 			} else {
 				if (saveAndFinish()) {
 					intent.putExtra(DATETIME_EXTRA, transaction.dateTime);
+					// the next transaction is not pre-filled again
+					IntentTransactionProcessor.removePrefillExtras(intent);
 					startActivityForResult(intent, -1);
 				}
 			}
@@ -368,6 +377,8 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 		if (transactionId != -1) {
 			isOpenCalculatorForTemplates &= isNewFromTemplate;
 			editTransaction(transaction);
+		} else if (prefill != null) {
+			editPrefilledTransaction(prefill, accountId);
 		} else {
 			setDateTime(transaction.dateTime);
 			categorySelector.selectCategory(NO_CATEGORY_ID);
@@ -767,6 +778,46 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 	}
 
 	protected abstract void editTransaction(Transaction transaction);
+
+	/** Whether this screen fills a new transaction from IntentTransactionProcessor's extras. */
+	protected boolean isIntentPrefillSupported() {
+		return false;
+	}
+
+	private void editPrefilledTransaction(IntentTransactionProcessor.Prefill prefill, long accountId) {
+		if (!prefill.accountGiven) {
+			// no account in the intent: the same default as any new transaction
+			long lastAccountId = MyPreferences.getLastAccount();
+			if (accountId != -1) {
+				transaction.fromAccountId = accountId;
+			} else if (isRememberLastAccount && lastAccountId != -1) {
+				transaction.fromAccountId = lastAccountId;
+			}
+		}
+		editTransaction(transaction);
+		if (isShowPayee && prefill.newPayeeTitle != null) {
+			payeeSelector.setPendingNewEntity(prefill.newPayeeTitle);
+		}
+		if (prefill.newProjectTitle != null) {
+			projectSelector.setPendingNewEntity(prefill.newProjectTitle);
+		}
+
+		// an account, category or currency that was not found is left empty; say which
+		List<String> notFound = new ArrayList<>();
+		if (prefill.unknownAccount != null) {
+			notFound.add(getString(R.string.intent_prefill_account_not_found, prefill.unknownAccount));
+		}
+		if (prefill.unknownCategory != null) {
+			notFound.add(getString(R.string.intent_prefill_category_not_found, prefill.unknownCategory));
+		}
+		if (prefill.unknownCurrency != null) {
+			notFound.add(getString(R.string.intent_prefill_currency_not_found, prefill.unknownCurrency));
+		}
+		if (!notFound.isEmpty()) {
+			Toast.makeText(this, String.join("\n", notFound), Toast.LENGTH_LONG).show();
+		}
+	}
+
 	protected void updateUIforPreventEditing() {}
 
 	protected boolean isPreventEditing() {
