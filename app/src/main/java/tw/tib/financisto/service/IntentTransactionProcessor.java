@@ -20,6 +20,7 @@ import tw.tib.financisto.R;
 import tw.tib.financisto.db.DatabaseAdapter;
 import tw.tib.financisto.model.Account;
 import tw.tib.financisto.model.Category;
+import tw.tib.financisto.model.Currency;
 import tw.tib.financisto.model.Payee;
 import tw.tib.financisto.model.Project;
 import tw.tib.financisto.model.Tag;
@@ -45,6 +46,22 @@ public class IntentTransactionProcessor {
     public static final String TIMESTAMP_MILLIS = "TIMESTAMP_MILLIS"; // Unix timestamp in milliseconds, long
     public static final String TIMESTAMP_ISO8601 = "TIMESTAMP_ISO8601"; // "2026-09-10T19:57:45+08:00"
     public static final String TAGS = "TAGS"; // String ("food" or "food, groceries"), String[], or ArrayList<String>
+    // A payment in a foreign currency: the currency's code as in the currency list ("GBP") and the
+    // amount in that currency, in the same format as AMOUNT. Used only when both are given; AMOUNT
+    // stays the amount in the account's currency, and its sign wins if the two signs differ.
+    public static final String ORIGINAL_CURRENCY = "ORIGINAL_CURRENCY";
+    public static final String ORIGINAL_AMOUNT = "ORIGINAL_AMOUNT";
+
+    /**
+     * The extras that pre-fill a new transaction in TransactionActivity. TAGS is left out: the
+     * activity already reads it on its own. ACCOUNT_NAME_TRANSFER_TO is left out because
+     * TransactionActivity does not create transfers.
+     */
+    private static final String[] PREFILL_EXTRAS = {
+            ACCOUNT_NAME, ACCOUNT_NUMBER_PARTIAL, CATEGORY_NAME, PAYEE_NAME, PROJECT_NAME, AMOUNT,
+            NOTE, IS_CREDIT_CARD_PAYMENT, STATUS, TIMESTAMP_MILLIS, TIMESTAMP_ISO8601,
+            ORIGINAL_CURRENCY, ORIGINAL_AMOUNT
+    };
 
     private static BigDecimal HUNDRED = new BigDecimal(100);
 
@@ -54,32 +71,17 @@ public class IntentTransactionProcessor {
 
     public Transaction createTransactionFromIntent(Intent intent) {
         Transaction tx = null;
-        long accountId = 0;
         long transferToAccountId = 0;
 
-        String accountName = intent.getStringExtra(ACCOUNT_NAME);
-        if (accountName != null && !accountName.trim().isEmpty()) {
-            accountName = accountName.trim();
-            accountId = db.getEntityIdByTitle(Account.class, accountName);
-        }
-
-        String accountNumberPartial = intent.getStringExtra(ACCOUNT_NUMBER_PARTIAL);
-        if (accountId == 0 && accountNumberPartial != null && !accountNumberPartial.trim().isEmpty()) {
-            accountNumberPartial = accountNumberPartial.trim();
-            List<Long> accountIds = db.findAccountsByNumber(accountNumberPartial);
-            if (!accountIds.isEmpty()) {
-                accountId = accountIds.get(0);
-                if (accountIds.size() > 1) {
-                    Log.e(TAG, format("Accounts number with partial `%s` - more than one!", accountNumberPartial));
-                }
-            }
-        }
+        String accountName = trimmedExtra(intent, ACCOUNT_NAME);
+        String accountNumberPartial = trimmedExtra(intent, ACCOUNT_NUMBER_PARTIAL);
+        long accountId = findAccountId(accountName, accountNumberPartial);
 
         Log.d(TAG, format("accountName=%s accountNumberPartial=%s accountId=%s", accountName, accountNumberPartial, accountId));
 
         // Stress-test finding: Fail gracefully if account cannot be resolved, avoiding silent drop of transaction
         if (accountId <= 0) {
-            String identifier = accountName != null && !accountName.isEmpty() ? accountName : (accountNumberPartial != null ? accountNumberPartial : "");
+            String identifier = accountName != null ? accountName : (accountNumberPartial != null ? accountNumberPartial : "");
             Log.w(TAG, format("Account not found: %s — transaction skipped", identifier));
             sendErrorNotification(format("Financisto: Unknown account '%s' — transaction not imported", identifier),
                     identifier.hashCode());
@@ -122,8 +124,8 @@ public class IntentTransactionProcessor {
             sendErrorNotification("Financisto: Missing or empty amount — transaction not imported", 2);
             return null;
         }
-        BigDecimal amount = SmsTransactionProcessor.toBigDecimal(amountString);
-        if (amount == null || amount.compareTo(BigDecimal.ZERO) == 0) {
+        BigDecimal amount = parseAmount(amountString);
+        if (amount == null) {
             Log.e(TAG, format("Invalid or zero AMOUNT '%s' — transaction skipped", amountString));
             sendErrorNotification(format("Financisto: Invalid amount '%s' — transaction not imported", amountString),
                     amountString.hashCode());
@@ -131,15 +133,6 @@ public class IntentTransactionProcessor {
         }
 
         Log.d(TAG, format("payee=%s project=%s amount=%s", payee, project, amount));
-
-        TransactionStatus status;
-        try {
-            status = TransactionStatus.valueOf(intent.getStringExtra(STATUS));
-        } catch (Exception e) {
-            status = TransactionStatus.UR;
-        }
-
-        Log.d(TAG, format("status=%s", status));
 
         if (amount.compareTo(BigDecimal.ZERO) != 0 && accountId != 0) {
             tx = new Transaction();
@@ -159,22 +152,17 @@ public class IntentTransactionProcessor {
                 tx.projectId = project.id;
             }
 
-            tx.fromAmount = amount.multiply(HUNDRED).longValue();
+            tx.fromAmount = toCents(amount);
             if (transferToAccountId != 0) {
                 tx.toAccountId = transferToAccountId;
                 tx.toAmount = -1L * tx.fromAmount;
+            } else if (!applyOriginalCurrency(tx, intent, amount)) {
+                Log.w(TAG, format("Unknown ORIGINAL_CURRENCY '%s' — saved without the original amount",
+                        intent.getStringExtra(ORIGINAL_CURRENCY)));
             }
 
-            String note = intent.getStringExtra(NOTE);
-            if (note != null) {
-                tx.note = note;
-            }
-
-            tx.status = status;
-
-            if (intent.getBooleanExtra(IS_CREDIT_CARD_PAYMENT, false)) {
-                tx.isCCardPayment = 1;
-            }
+            applyCommonFields(tx, intent);
+            Log.d(TAG, format("status=%s", tx.status));
 
             List<String> tags = extractTagsFromIntent(intent);
             if (!tags.isEmpty()) {
@@ -184,27 +172,235 @@ public class IntentTransactionProcessor {
                 tx.tags = "\n" + String.join("\n", tags) + "\n";
             }
 
-            long timestampMillis = intent.getLongExtra(TIMESTAMP_MILLIS, 0);
-            if (timestampMillis != 0) {
-                tx.dateTime = timestampMillis;
-            }
-
-            String timeIso8601 = intent.getStringExtra(TIMESTAMP_ISO8601);
-            if (timeIso8601 != null) {
-                DateTimeFormatter timeFormatter = DateTimeFormatter.ISO_DATE_TIME;
-                try {
-                    tx.dateTime = Instant.from(timeFormatter.parse(timeIso8601)).toEpochMilli();
-                } catch (Exception ignored) {
-
-                }
-            }
-
             tx.id = db.insertOrUpdate(tx);
             return tx;
         }
 
         return null;
     }
+
+    /**
+     * A new transaction built from an intent for the user to review in TransactionActivity.
+     * Building it writes nothing to the database: a payee or project that does not exist yet is
+     * only named here, and the activity creates it when the user saves.
+     */
+    public static class Prefill {
+        public final Transaction transaction = new Transaction();
+        /** True when the intent names an account, whether it was found or not. */
+        public boolean accountGiven;
+        /** What the intent gave for an account, category or currency that was not found. */
+        public String unknownAccount;
+        public String unknownCategory;
+        public String unknownCurrency;
+        /** Payee and project titles that are not in the database yet. */
+        public String newPayeeTitle;
+        public String newProjectTitle;
+    }
+
+    public static boolean hasPrefillExtras(Intent intent) {
+        if (intent == null) return false;
+        for (String key : PREFILL_EXTRAS) {
+            if (intent.hasExtra(key)) return true;
+        }
+        return false;
+    }
+
+    public static void removePrefillExtras(Intent intent) {
+        for (String key : PREFILL_EXTRAS) {
+            intent.removeExtra(key);
+        }
+    }
+
+    public Prefill createPrefillFromIntent(Intent intent) {
+        Prefill p = new Prefill();
+        Transaction tx = p.transaction;
+        tx.isTemplate = 0;
+
+        String accountName = trimmedExtra(intent, ACCOUNT_NAME);
+        String accountNumberPartial = trimmedExtra(intent, ACCOUNT_NUMBER_PARTIAL);
+        p.accountGiven = accountName != null || accountNumberPartial != null;
+        tx.fromAccountId = Math.max(0, findAccountId(accountName, accountNumberPartial));
+        if (p.accountGiven && tx.fromAccountId == 0) {
+            p.unknownAccount = accountName != null ? accountName : accountNumberPartial;
+        }
+
+        String payeeName = trimmedExtra(intent, PAYEE_NAME);
+        if (payeeName != null) {
+            Payee payee = db.findEntityByTitle(Payee.class, payeeName);
+            if (payee != null) {
+                tx.payeeId = payee.id;
+                tx.categoryId = payee.lastCategoryId;
+            } else {
+                p.newPayeeTitle = payeeName;
+            }
+        }
+
+        String categoryName = trimmedExtra(intent, CATEGORY_NAME);
+        if (categoryName != null) {
+            Category category = db.getCategory(categoryName);
+            if (category != null) {
+                tx.categoryId = category.id;
+            } else {
+                // Empty rather than the payee's last category, so the user sees it must be picked.
+                tx.categoryId = 0;
+                p.unknownCategory = categoryName;
+            }
+        }
+
+        String projectName = trimmedExtra(intent, PROJECT_NAME);
+        if (projectName != null) {
+            Project project = db.findEntityByTitle(Project.class, projectName);
+            if (project != null) {
+                tx.projectId = project.id;
+            } else {
+                p.newProjectTitle = projectName;
+            }
+        }
+
+        BigDecimal amount = null;
+        String amountString = trimmedExtra(intent, AMOUNT);
+        if (amountString != null) {
+            amount = parseAmount(amountString);
+            if (amount != null) {
+                tx.fromAmount = toCents(amount);
+            } else {
+                Log.w(TAG, format("Invalid AMOUNT '%s' — left empty", amountString));
+            }
+        }
+
+        if (!applyOriginalCurrency(tx, intent, amount)) {
+            p.unknownCurrency = trimmedExtra(intent, ORIGINAL_CURRENCY);
+        }
+
+        applyCommonFields(tx, intent);
+        return p;
+    }
+
+    /** Account by exact name first, then by the end of its number; 0 when neither matches. */
+    private long findAccountId(String accountName, String accountNumberPartial) {
+        long accountId = 0;
+        if (accountName != null) {
+            accountId = db.getEntityIdByTitle(Account.class, accountName);
+        }
+        if (accountId <= 0 && accountNumberPartial != null) {
+            List<Long> accountIds = db.findAccountsByNumber(accountNumberPartial);
+            if (!accountIds.isEmpty()) {
+                accountId = accountIds.get(0);
+                if (accountIds.size() > 1) {
+                    Log.e(TAG, format("Accounts number with partial `%s` - more than one!", accountNumberPartial));
+                }
+            }
+        }
+        return accountId;
+    }
+
+    /** Note, status, credit-card flag and date: the same for a saved and a pre-filled transaction. */
+    private static void applyCommonFields(Transaction tx, Intent intent) {
+        String note = intent.getStringExtra(NOTE);
+        if (note != null) {
+            tx.note = note;
+        }
+
+        TransactionStatus status;
+        try {
+            status = TransactionStatus.valueOf(intent.getStringExtra(STATUS));
+        } catch (Exception e) {
+            status = TransactionStatus.UR;
+        }
+        tx.status = status;
+
+        if (intent.getBooleanExtra(IS_CREDIT_CARD_PAYMENT, false)) {
+            tx.isCCardPayment = 1;
+        }
+
+        long timestampMillis = intent.getLongExtra(TIMESTAMP_MILLIS, 0);
+        if (timestampMillis != 0) {
+            tx.dateTime = timestampMillis;
+        }
+
+        String timeIso8601 = intent.getStringExtra(TIMESTAMP_ISO8601);
+        if (timeIso8601 != null) {
+            DateTimeFormatter timeFormatter = DateTimeFormatter.ISO_DATE_TIME;
+            try {
+                tx.dateTime = Instant.from(timeFormatter.parse(timeIso8601)).toEpochMilli();
+            } catch (Exception ignored) {
+
+            }
+        }
+    }
+
+    /**
+     * Sets the original currency and amount from ORIGINAL_CURRENCY and ORIGINAL_AMOUNT. Does
+     * nothing unless both are given, or when the currency is the account's own.
+     *
+     * @param amount the amount in the account's currency, or null if not known
+     * @return false only when ORIGINAL_CURRENCY names a currency that is not in the database
+     */
+    private boolean applyOriginalCurrency(Transaction tx, Intent intent, BigDecimal amount) {
+        String code = trimmedExtra(intent, ORIGINAL_CURRENCY);
+        String originalAmountString = trimmedExtra(intent, ORIGINAL_AMOUNT);
+        if (code == null || originalAmountString == null) {
+            return true;
+        }
+        Currency currency = findCurrencyByCode(db.getAllCurrenciesList(), code);
+        if (currency == null) {
+            return false;
+        }
+        BigDecimal originalAmount = parseAmount(originalAmountString);
+        if (originalAmount == null) {
+            Log.w(TAG, format("Invalid ORIGINAL_AMOUNT '%s' — ignored", originalAmountString));
+            return true;
+        }
+        Account account = tx.fromAccountId > 0 ? db.getAccount(tx.fromAccountId) : null;
+        if (account != null && account.currency != null && account.currency.id == currency.id) {
+            return true;
+        }
+        tx.originalCurrencyId = currency.id;
+        tx.originalFromAmount = toCents(withSignOf(originalAmount, amount));
+        return true;
+    }
+
+    /** The currency whose code (Currency.name, e.g. "GBP") matches, ignoring case; null if none. */
+    static Currency findCurrencyByCode(List<Currency> currencies, String code) {
+        if (code == null) return null;
+        String wanted = code.trim();
+        for (Currency c : currencies) {
+            if (c.name != null && c.name.trim().equalsIgnoreCase(wanted)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /** value with the sign of reference; value unchanged when reference is null or zero. */
+    static BigDecimal withSignOf(BigDecimal value, BigDecimal reference) {
+        if (reference == null || reference.signum() == 0 || value.signum() == 0) {
+            return value;
+        }
+        return value.signum() == reference.signum() ? value : value.negate();
+    }
+
+    /** The amount as a number, or null if it is empty, not a number or zero. */
+    static BigDecimal parseAmount(String amountString) {
+        try {
+            BigDecimal amount = SmsTransactionProcessor.toBigDecimal(amountString);
+            return amount == null || amount.signum() == 0 ? null : amount;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    static long toCents(BigDecimal amount) {
+        return amount.multiply(HUNDRED).longValue();
+    }
+
+    private static String trimmedExtra(Intent intent, String key) {
+        String value = intent.getStringExtra(key);
+        if (value == null) return null;
+        value = value.trim();
+        return value.isEmpty() ? null : value;
+    }
+
     public static List<String> extractTagsFromIntent(Intent intent) {
         if (intent == null) return Collections.emptyList();
         List<String> result = new ArrayList<>();
