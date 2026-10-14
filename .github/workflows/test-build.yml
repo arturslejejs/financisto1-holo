@@ -1,0 +1,141 @@
+# Test build for the pre-filled transaction screen (issue #168).
+# Lives only on this fork's `ci` branch and is cherry-picked onto
+# `prefill-test`; it is never part of the pull request.
+# Dependencies (approved): GitHub's own actions, the gh CLI and the runner's
+# preinstalled Android SDK and Gradle, plus what Gradle downloads itself.
+name: test-build
+
+on:
+  push:
+    branches: [prefill-test]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: test-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The test copy keeps one signing key while this cache lives, so a new
+      # build installs over the previous test copy.
+      - name: Restore the test signing key
+        uses: actions/cache@v6
+        with:
+          path: ~/.android/debug.keystore
+          key: prtest-debug-keystore-v1
+
+      - name: Create the test signing key if the cache had none
+        run: |
+          if [ ! -f ~/.android/debug.keystore ]; then
+            mkdir -p ~/.android
+            keytool -genkeypair -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "NEW_KEY=yes" >> "$GITHUB_ENV"
+          fi
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android | grep -m1 'SHA256:'
+
+      - name: Cache Gradle downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('build.gradle', 'app/build.gradle', 'settings.gradle', 'gradle.properties') }}
+          restore-keys: gradle-
+
+      # Only in this checkout: a separate app ID and name, so the test copy
+      # installs next to the real Financisto and is easy to tell apart.
+      - name: Turn this checkout into the test copy
+        run: |
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          cat >> app/build.gradle <<'EOF'
+
+          // Added by the test-build workflow only; never committed.
+          android {
+              buildTypes {
+                  debug {
+                      applicationIdSuffix = ".prtest"
+                      versionNameSuffix = "-prtest"
+                  }
+              }
+          }
+          EOF
+          sed -i 's|<string name="app_name" translatable="false">Financisto</string>|<string name="app_name" translatable="false">Financisto PR test</string>|' app/src/main/res/values/common.xml
+          grep -q 'Financisto PR test' app/src/main/res/values/common.xml
+
+      - name: Show the tools
+        run: |
+          gradle --version
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
+
+      # Upstream already has failing unit tests (4 on 137bd61), so failures
+      # are reported in test-summary.txt instead of stopping the build.
+      # The summary goes onto the pre-release next to the APK.
+      - name: Unit tests (reported, not blocking)
+        run: |
+          gradle --no-daemon --continue testDebugUnitTest 2>&1 | tee -a build.log || true
+          dir=app/build/test-results/testDebugUnitTest
+          total=0; failed=0
+          for f in "$dir"/*.xml; do
+            [ -f "$f" ] || continue
+            t=$(grep -o -m1 'tests="[0-9]*"' "$f" | tr -dc 0-9)
+            x=$(grep -o -m1 'failures="[0-9]*"' "$f" | tr -dc 0-9)
+            e=$(grep -o -m1 'errors="[0-9]*"' "$f" | tr -dc 0-9)
+            total=$((total + ${t:-0})); failed=$((failed + ${x:-0} + ${e:-0}))
+          done
+          {
+            echo "unit tests: $total, failed: $failed"
+            awk '/<testcase /{
+                   match($0, /name="[^"]*"/); n = substr($0, RSTART + 6, RLENGTH - 7)
+                   match($0, /classname="[^"]*"/); c = substr($0, RSTART + 11, RLENGTH - 12) }
+                 /<failure|<error/ { print "FAILED " c "." n }' "$dir"/*.xml 2>/dev/null | sort
+          } > test-summary.txt
+          cat test-summary.txt
+          # No results at all means the tests did not even compile.
+          [ "$total" -gt 0 ]
+          echo "TEST_LINE=unit tests: $total, failed: $failed" >> "$GITHUB_ENV"
+
+      - name: Build the test APK
+        run: gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee -a build.log; test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Publish on the rolling pre-release test-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          cp "$apk" financisto-prtest.apk
+          notes="Test copy of Financisto (app ID tw.tib.financisto.prtest) built from ${GITHUB_SHA::7} on $(date -u '+%F %H:%M') UTC. For testing only. ${TEST_LINE}."
+          if [ "${NEW_KEY:-}" = yes ]; then
+            notes="$notes NEW SIGNING KEY: uninstall the previous test copy before installing this one."
+          fi
+          gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
+          gh release create test-build financisto-prtest.apk test-summary.txt --prerelease \
+            --target "$GITHUB_SHA" --title "Test build ${GITHUB_SHA::7}" --notes "$notes"
+
+      # So an agent without access to Actions logs can still read a failure.
+      - name: Publish the build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          touch build.log test-summary.txt
+          tail -n 400 build.log > build-tail.log
+          gh release delete test-build-log --yes --cleanup-tag 2>/dev/null || true
+          gh release create test-build-log build-tail.log test-summary.txt --prerelease \
+            --target "$GITHUB_SHA" --title "Failed test build ${GITHUB_SHA::7}" \
+            --notes "Last 400 lines of the Gradle output of run ${GITHUB_RUN_ID}."
