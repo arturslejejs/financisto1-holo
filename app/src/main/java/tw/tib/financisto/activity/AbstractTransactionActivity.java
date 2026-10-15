@@ -794,13 +794,16 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 				transaction.fromAccountId = lastAccountId;
 			}
 		}
+		// The payee and project names go into their search boxes, as if typed: the user can edit
+		// them, and saving picks or creates them (checkSelectedEntities). A hidden field keeps
+		// the payee or project found by the intent.
+		boolean payeeAsSearch = isShowPayee && prefill.payeeName != null;
+		boolean projectAsSearch = isShowProject && prefill.projectName != null;
+		if (payeeAsSearch) transaction.payeeId = Payee.EMPTY.id;
+		if (projectAsSearch) transaction.projectId = NO_PROJECT_ID;
 		editTransaction(transaction);
-		if (isShowPayee && prefill.newPayeeTitle != null) {
-			payeeSelector.setPendingNewEntity(prefill.newPayeeTitle);
-		}
-		if (prefill.newProjectTitle != null) {
-			projectSelector.setPendingNewEntity(prefill.newProjectTitle);
-		}
+		if (payeeAsSearch) payeeSelector.setSearchText(prefill.payeeName);
+		if (projectAsSearch) projectSelector.setSearchText(prefill.projectName);
 
 		// an account, category or currency that was not found is left empty; say which
 		List<String> notFound = new ArrayList<>();

@@ -181,8 +181,8 @@ public class IntentTransactionProcessor {
 
     /**
      * A new transaction built from an intent for the user to review in TransactionActivity.
-     * Building it writes nothing to the database: a payee or project that does not exist yet is
-     * only named here, and the activity creates it when the user saves.
+     * Building it writes nothing to the database: the payee and project names are passed on as
+     * given, and the activity matches or creates them when the user saves.
      */
     public static class Prefill {
         public final Transaction transaction = new Transaction();
@@ -192,9 +192,12 @@ public class IntentTransactionProcessor {
         public String unknownAccount;
         public String unknownCategory;
         public String unknownCurrency;
-        /** Payee and project titles that are not in the database yet. */
-        public String newPayeeTitle;
-        public String newProjectTitle;
+        /**
+         * The payee and project names as the intent gives them, found or not. A payee or project
+         * that exists is also set in the transaction, for a screen that does not show that field.
+         */
+        public String payeeName;
+        public String projectName;
     }
 
     public static boolean hasPrefillExtras(Intent intent) {
@@ -224,14 +227,12 @@ public class IntentTransactionProcessor {
             p.unknownAccount = accountName != null ? accountName : accountNumberPartial;
         }
 
-        String payeeName = trimmedExtra(intent, PAYEE_NAME);
-        if (payeeName != null) {
-            Payee payee = db.findEntityByTitle(Payee.class, payeeName);
+        p.payeeName = trimmedExtra(intent, PAYEE_NAME);
+        if (p.payeeName != null) {
+            Payee payee = db.findEntityByTitle(Payee.class, p.payeeName);
             if (payee != null) {
                 tx.payeeId = payee.id;
                 tx.categoryId = payee.lastCategoryId;
-            } else {
-                p.newPayeeTitle = payeeName;
             }
         }
 
@@ -247,13 +248,11 @@ public class IntentTransactionProcessor {
             }
         }
 
-        String projectName = trimmedExtra(intent, PROJECT_NAME);
-        if (projectName != null) {
-            Project project = db.findEntityByTitle(Project.class, projectName);
+        p.projectName = trimmedExtra(intent, PROJECT_NAME);
+        if (p.projectName != null) {
+            Project project = db.findEntityByTitle(Project.class, p.projectName);
             if (project != null) {
                 tx.projectId = project.id;
-            } else {
-                p.newProjectTitle = projectName;
             }
         }
 
