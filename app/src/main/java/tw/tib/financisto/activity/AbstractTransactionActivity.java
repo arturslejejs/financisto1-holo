@@ -242,6 +242,7 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 				// NEW_TRANSACTION service), shown for review and saved only by the user.
 				prefill = new IntentTransactionProcessor(db).createPrefillFromIntent(intent);
 				transaction = prefill.transaction;
+				applyCategoryLastUsed(prefill);
 			}
 			transaction.isTemplate = intent.getIntExtra(TEMPLATE_EXTRA, transaction.isTemplate);
 		}
@@ -782,6 +783,24 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 	/** Whether this screen fills a new transaction from IntentTransactionProcessor's extras. */
 	protected boolean isIntentPrefillSupported() {
 		return false;
+	}
+
+	/**
+	 * The category's last project and location, as when the user picks the category by hand
+	 * (onCategorySelected with selectLast and the "remember" preferences). editTransaction()
+	 * selects the category the way an edit does, which leaves them out. Runs before the
+	 * selectors are created, so an inactive project or location is still listed.
+	 */
+	private void applyCategoryLastUsed(IntentTransactionProcessor.Prefill prefill) {
+		if (transaction.categoryId <= 0) return;
+		Category category = db.getCategory(transaction.categoryId);
+		if (category == null) return;
+		if (isShowProject && isRememberLastProject && prefill.projectName == null) {
+			transaction.projectId = category.lastProjectId;
+		}
+		if (isShowLocation && isRememberLastLocation) {
+			transaction.locationId = category.lastLocationId;
+		}
 	}
 
 	private void editPrefilledTransaction(IntentTransactionProcessor.Prefill prefill, long accountId) {
