@@ -423,6 +423,11 @@ public abstract class MyEntitySelector<T extends MyEntity, A extends AbstractAct
                 && selectedEntityId == 0)
         {
             String title = autoCompleteFilter.getText().toString();
+            if (title.trim().isEmpty()) {
+                // nothing typed means no entry; findOrInsertEntityByTitle("") returns an unsaved
+                // entity whose id -1 would be stored with the transaction
+                return;
+            }
             T e = em.findOrInsertEntityByTitle(entityClass, title);
             selectEntity(e);
         }

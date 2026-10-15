@@ -242,6 +242,7 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 				// NEW_TRANSACTION service), shown for review and saved only by the user.
 				prefill = new IntentTransactionProcessor(db).createPrefillFromIntent(intent);
 				transaction = prefill.transaction;
+				applyPayeeLastCategory(prefill);
 				applyCategoryLastUsed(prefill);
 			}
 			transaction.isTemplate = intent.getIntExtra(TEMPLATE_EXTRA, transaction.isTemplate);
@@ -786,6 +787,17 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 	}
 
 	/**
+	 * The payee's last category when the intent names no category, as when the user picks the
+	 * payee by hand (TransactionActivity.onSelectedId with "remember last category" on).
+	 */
+	private void applyPayeeLastCategory(IntentTransactionProcessor.Prefill prefill) {
+		if (transaction.categoryId == NO_CATEGORY_ID && prefill.unknownCategory == null
+				&& isRememberLastCategory && prefill.payeeLastCategoryId > 0) {
+			transaction.categoryId = prefill.payeeLastCategoryId;
+		}
+	}
+
+	/**
 	 * The category's last project and location, as when the user picks the category by hand
 	 * (onCategorySelected with selectLast and the "remember" preferences). editTransaction()
 	 * selects the category the way an edit does, which leaves them out. Runs before the
@@ -824,19 +836,28 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 		if (payeeAsSearch) payeeSelector.setSearchText(prefill.payeeName);
 		if (projectAsSearch) projectSelector.setSearchText(prefill.projectName);
 
-		// an account, category or currency that was not found is left empty; say which
-		List<String> notFound = new ArrayList<>();
+		// say which values were not found or not valid; those fields are left empty
+		List<String> problems = new ArrayList<>();
 		if (prefill.unknownAccount != null) {
-			notFound.add(getString(R.string.intent_prefill_account_not_found, prefill.unknownAccount));
+			problems.add(getString(R.string.intent_prefill_account_not_found, prefill.unknownAccount));
 		}
 		if (prefill.unknownCategory != null) {
-			notFound.add(getString(R.string.intent_prefill_category_not_found, prefill.unknownCategory));
+			problems.add(getString(R.string.intent_prefill_category_not_found, prefill.unknownCategory));
 		}
 		if (prefill.unknownCurrency != null) {
-			notFound.add(getString(R.string.intent_prefill_currency_not_found, prefill.unknownCurrency));
+			problems.add(getString(R.string.intent_prefill_currency_not_found, prefill.unknownCurrency));
 		}
-		if (!notFound.isEmpty()) {
-			Toast.makeText(this, String.join("\n", notFound), Toast.LENGTH_LONG).show();
+		if (prefill.invalidAmount != null) {
+			problems.add(getString(R.string.intent_prefill_invalid_amount, prefill.invalidAmount));
+		}
+		if (prefill.invalidOriginalAmount != null) {
+			problems.add(getString(R.string.intent_prefill_invalid_amount, prefill.invalidOriginalAmount));
+		}
+		if (prefill.originalIncomplete) {
+			problems.add(getString(R.string.intent_prefill_original_incomplete));
+		}
+		if (!problems.isEmpty()) {
+			Toast.makeText(this, String.join("\n", problems), Toast.LENGTH_LONG).show();
 		}
 	}
 

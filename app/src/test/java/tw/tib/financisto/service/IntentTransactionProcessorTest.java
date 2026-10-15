@@ -2,37 +2,12 @@ package tw.tib.financisto.service;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 
 import org.junit.Test;
 
 import java.math.BigDecimal;
-import java.util.Arrays;
-import java.util.List;
-
-import tw.tib.financisto.model.Currency;
 
 public class IntentTransactionProcessorTest {
-
-    private static Currency currency(long id, String code) {
-        Currency c = new Currency();
-        c.id = id;
-        c.name = code;
-        c.title = code;
-        return c;
-    }
-
-    @Test
-    public void findCurrencyByCode_ignoresCaseAndSpaces() {
-        Currency eur = currency(1, "EUR");
-        Currency gbp = currency(2, "GBP");
-        List<Currency> all = Arrays.asList(eur, gbp);
-
-        assertSame(gbp, IntentTransactionProcessor.findCurrencyByCode(all, "GBP"));
-        assertSame(gbp, IntentTransactionProcessor.findCurrencyByCode(all, " gbp "));
-        assertNull(IntentTransactionProcessor.findCurrencyByCode(all, "USD"));
-        assertNull(IntentTransactionProcessor.findCurrencyByCode(all, null));
-    }
 
     @Test
     public void withSignOf_followsTheAccountAmount() {
@@ -71,8 +46,15 @@ public class IntentTransactionProcessorTest {
     }
 
     @Test
-    public void toCents() {
-        assertEquals(-1625L, IntentTransactionProcessor.toCents(new BigDecimal("-16.25")));
-        assertEquals(3500L, IntentTransactionProcessor.toCents(new BigDecimal("35")));
+    public void toMinorUnits_twoDecimals() {
+        assertEquals(-1625L, IntentTransactionProcessor.toMinorUnits(new BigDecimal("-16.25"), 2));
+        assertEquals(3500L, IntentTransactionProcessor.toMinorUnits(new BigDecimal("35"), 2));
+    }
+
+    @Test
+    public void toMinorUnits_threeDecimals() {
+        // e.g. KWD: Currency.getScale() is 3, so 1.500 is stored as 1500, not 150
+        assertEquals(1500L, IntentTransactionProcessor.toMinorUnits(new BigDecimal("1.500"), 3));
+        assertEquals(-1234L, IntentTransactionProcessor.toMinorUnits(new BigDecimal("-1.234"), 3));
     }
 }
