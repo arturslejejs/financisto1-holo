@@ -128,6 +128,7 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 	protected String notificationOptions;
 
 	protected boolean isDuplicate = false;
+	private boolean isPrefilled = false;
 
 	protected PayeeSelector<AbstractTransactionActivity> payeeSelector;
 	protected ProjectSelector<AbstractTransactionActivity> projectSelector;
@@ -240,8 +241,9 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 			} else if (isIntentPrefillSupported() && IntentTransactionProcessor.hasPrefillExtras(intent)) {
 				// A new transaction pre-filled by another app (the same extras as the
 				// NEW_TRANSACTION service), shown for review and saved only by the user.
-				prefill = new IntentTransactionProcessor(db).createPrefillFromIntent(intent);
+				prefill = new IntentTransactionProcessor(db).createPrefillFromIntent(intent, defaultAccountId(accountId));
 				transaction = prefill.transaction;
+				isPrefilled = true;
 				applyPayeeLastCategory(prefill);
 				applyCategoryLastUsed(prefill);
 			}
@@ -369,8 +371,11 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 			} else {
 				if (saveAndFinish()) {
 					intent.putExtra(DATETIME_EXTRA, transaction.dateTime);
-					// the next transaction is not pre-filled again
-					IntentTransactionProcessor.removePrefillExtras(intent);
+					if (isPrefilled) {
+						// after a pre-fill the next transaction starts empty; a screen opened with
+						// TAGS only keeps them, as before
+						IntentTransactionProcessor.removePrefillExtras(intent);
+					}
 					startActivityForResult(intent, -1);
 				}
 			}
@@ -380,7 +385,7 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 			isOpenCalculatorForTemplates &= isNewFromTemplate;
 			editTransaction(transaction);
 		} else if (prefill != null) {
-			editPrefilledTransaction(prefill, accountId);
+			editPrefilledTransaction(prefill);
 		} else {
 			setDateTime(transaction.dateTime);
 			categorySelector.selectCategory(NO_CATEGORY_ID);
@@ -815,16 +820,20 @@ public abstract class AbstractTransactionActivity extends AbstractActivity imple
 		}
 	}
 
-	private void editPrefilledTransaction(IntentTransactionProcessor.Prefill prefill, long accountId) {
-		if (!prefill.accountGiven) {
-			// no account in the intent: the same default as any new transaction
-			long lastAccountId = MyPreferences.getLastAccount();
-			if (accountId != -1) {
-				transaction.fromAccountId = accountId;
-			} else if (isRememberLastAccount && lastAccountId != -1) {
-				transaction.fromAccountId = lastAccountId;
-			}
+	/**
+	 * The account a new transaction starts with when the intent names none, as for any new
+	 * transaction: the ACCOUNT_ID_EXTRA, else the last account with "remember last account" on.
+	 * 0 for none. Known before the pre-fill is built, so the amount uses that account's decimals.
+	 */
+	private long defaultAccountId(long accountIdExtra) {
+		if (accountIdExtra != -1) {
+			return accountIdExtra;
 		}
+		long lastAccountId = MyPreferences.getLastAccount();
+		return isRememberLastAccount && lastAccountId != -1 ? lastAccountId : 0;
+	}
+
+	private void editPrefilledTransaction(IntentTransactionProcessor.Prefill prefill) {
 		// The payee and project names go into their search boxes, as if typed: the user can edit
 		// them, and saving picks or creates them (checkSelectedEntities). A hidden field keeps
 		// the payee or project found by the intent.

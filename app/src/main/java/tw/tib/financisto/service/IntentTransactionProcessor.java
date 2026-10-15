@@ -231,7 +231,11 @@ public class IntentTransactionProcessor {
         intent.removeExtra("tags");
     }
 
-    public Prefill createPrefillFromIntent(Intent intent) {
+    /**
+     * @param defaultAccountId the account to use when the intent names none (the screen's usual
+     *                         default for a new transaction), or 0 for none
+     */
+    public Prefill createPrefillFromIntent(Intent intent, long defaultAccountId) {
         Prefill p = new Prefill();
         Transaction tx = p.transaction;
         tx.isTemplate = 0;
@@ -239,9 +243,14 @@ public class IntentTransactionProcessor {
         String accountName = trimmedExtra(intent, ACCOUNT_NAME);
         String accountNumberPartial = trimmedExtra(intent, ACCOUNT_NUMBER_PARTIAL);
         p.accountGiven = accountName != null || accountNumberPartial != null;
-        tx.fromAccountId = Math.max(0, findAccountId(accountName, accountNumberPartial));
-        if (p.accountGiven && tx.fromAccountId == 0) {
-            p.unknownAccount = accountName != null ? accountName : accountNumberPartial;
+        if (p.accountGiven) {
+            tx.fromAccountId = Math.max(0, findAccountId(accountName, accountNumberPartial));
+            if (tx.fromAccountId == 0) {
+                p.unknownAccount = accountName != null ? accountName : accountNumberPartial;
+            }
+        } else if (defaultAccountId > 0 && db.getAccount(defaultAccountId) != null) {
+            // set before the amounts below, which use the account's currency
+            tx.fromAccountId = defaultAccountId;
         }
 
         p.payeeName = trimmedExtra(intent, PAYEE_NAME);
